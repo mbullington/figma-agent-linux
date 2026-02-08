@@ -3,7 +3,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use fontconfig_parser::FontConfig;
 use itertools::{Either, Itertools};
 
 use crate::path::expand_home;
@@ -101,8 +100,14 @@ fn test_parse() {
 impl Config {
     pub fn effective_font_directories(
         &self,
-        fontconfig: &FontConfig,
+        system_font_directories: impl IntoIterator<Item = PathBuf>,
     ) -> impl Iterator<Item = PathBuf> {
+        let system_font_directories = if self.use_system_fonts {
+            Either::Left(system_font_directories.into_iter())
+        } else {
+            Either::Right(iter::empty())
+        };
+
         self.font_directories
             .iter()
             .filter_map(|directory| match expand_home(directory) {
@@ -112,11 +117,7 @@ impl Config {
                     None
                 }
             })
-            .chain(if self.use_system_fonts {
-                Either::Left(fontconfig.dirs.iter().map(|dir| dir.path.clone()))
-            } else {
-                Either::Right(iter::empty())
-            })
+            .chain(system_font_directories)
             .filter_map(|directory| match directory.canonicalize() {
                 Ok(directory) => Some(directory),
                 Err(error) => {

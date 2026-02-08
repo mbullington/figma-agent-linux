@@ -1,11 +1,11 @@
 use std::{
     collections::{HashMap, HashSet},
+    env,
     fs,
     path::{Path, PathBuf},
     sync::LazyLock,
 };
 
-use fontconfig_parser::FontConfig;
 use tokio::sync::RwLock;
 
 use crate::{
@@ -22,11 +22,13 @@ pub mod renderer;
 pub mod routes;
 pub mod scanner;
 
+#[cfg(not(target_os = "macos"))]
 pub static XDG_DIRECTORIES: LazyLock<xdg::BaseDirectories> =
     LazyLock::new(|| xdg::BaseDirectories::with_prefix("figma-agent"));
 
-pub static FONTCONFIG: LazyLock<FontConfig> = LazyLock::new(|| {
-    let mut font_config = FontConfig::default();
+#[cfg(not(target_os = "macos"))]
+pub static FONTCONFIG: LazyLock<fontconfig_parser::FontConfig> = LazyLock::new(|| {
+    let mut font_config = fontconfig_parser::FontConfig::default();
     if let Err(error) = font_config.merge_config("/etc/fonts/fonts.conf") {
         tracing::warn!(
             "Failed to load Fontconfig config file: /etc/fonts/fonts.conf, error: {error:?}"
@@ -35,9 +37,52 @@ pub static FONTCONFIG: LazyLock<FontConfig> = LazyLock::new(|| {
     font_config
 });
 
+fn find_config_file() -> Option<PathBuf> {
+    if let Some(path) = env::var_os("FIGMA_AGENT_CONFIG") {
+        return Some(PathBuf::from(path));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return env::home_dir()
+            .map(|home| home.join("Library/Application Support/figma-agent/config.json"))
+            .filter(|path| path.is_file());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        XDG_DIRECTORIES.find_config_file("config.json")
+    }
+}
+
+fn system_font_directories() -> Vec<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut directories = vec![
+            PathBuf::from("/System/Library/Fonts"),
+            PathBuf::from("/Library/Fonts"),
+            PathBuf::from("/Network/Library/Fonts"),
+        ];
+        if let Some(home) = env::home_dir() {
+            directories.push(home.join("Library/Fonts"));
+        } else {
+            tracing::warn!("Failed to locate home directory; skipping user font directory.");
+        }
+        return directories;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        return FONTCONFIG
+            .dirs
+            .iter()
+            .map(|dir| dir.path.clone())
+            .collect();
+    }
+}
+
 pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
-    XDG_DIRECTORIES
-        .find_config_file("config.json")
+    find_config_file()
         .and_then(|path| {
             tracing::info!("Use config file: {path:?}");
             match Config::from_path(&path) {
@@ -59,7 +104,9 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
 });
 
 pub static EFFECTIVE_FONT_DIRECTORIES: LazyLock<Vec<PathBuf>> = LazyLock::new(|| {
-    let directories = CONFIG.effective_font_directories(&FONTCONFIG).collect();
+    let directories = CONFIG
+        .effective_font_directories(system_font_directories())
+        .collect();
     tracing::info!("Use effective font directories: {directories:?}");
     directories
 });
